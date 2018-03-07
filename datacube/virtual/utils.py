@@ -50,3 +50,12 @@ def output_geobox(datasets, grid_spec,
 def product_definitions_from_index(index):
     return {product.name: product.definition
             for product in index.products.get_all()}
+
+
+def identical_attrs(rasters):
+    first, *rest = [r.attrs for r in rasters]
+    for other in rest:
+        # should possibly just emit a warning
+        assert first == other, "{} is not the same as {}".format(first, other)
+
+    return first

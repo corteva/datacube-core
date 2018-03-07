@@ -26,6 +26,7 @@ from datacube.api.grid_workflow import _fast_slice
 from .utils import select_datasets_inside_polygon
 from .utils import output_geobox
 from .utils import product_definitions_from_index
+from .utils import identical_attrs
 
 
 class VirtualProductException(Exception):
@@ -404,7 +405,9 @@ class Collate(VirtualProduct):
         rasters = [fetch_data(child, raster.filter(is_from(source_index)).map(strip_source))
                    for source_index, child in enumerate(self.children)]
 
-        return xarray.concat([r for r in rasters if r is not None], dim='time')
+        non_empty = [r for r in rasters if r is not None]
+
+        return xarray.concat(non_empty, dim='time').assign_attrs(**identical_attrs(non_empty))
 
 
 def collate(*children, index_measurement_name=None):
@@ -497,7 +500,7 @@ class Juxtapose(VirtualProduct):
         rasters = [child.fetch_data(fetch_recipe(source_index))
                    for source_index, child in enumerate(self.children)]
 
-        return xarray.merge(rasters)
+        return xarray.merge(rasters).assign_attrs(**identical_attrs(rasters))
 
 
 def juxtapose(*children):
