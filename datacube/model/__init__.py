@@ -327,6 +327,10 @@ class Measurement(object):
         attrs = ", ".join("{}={}".format(key, value) for key, value in vars(self).items())
         return "Measurement({})".format(attrs)
 
+    def __repr__(self):
+        attrs = ", ".join("{}={}".format(key, value) for key, value in self.__dict__.items())
+        return "Measurement({})".format(attrs)
+
 
 @schema_validated(SCHEMA_PATH / 'metadata-type-schema.yaml')
 class MetadataType(object):

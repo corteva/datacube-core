@@ -263,11 +263,12 @@ def basic_product(product_name, measurement_names=None,
 
 
 class Transform(VirtualProduct):
+    """
+    Apply some computation to the loaded data.
+    """
     def __init__(self, child,
-                 data_transform=None, measurement_transform=None, raster_transform=None):
-        """
-        :param transform: a `TransformationFunction`
-        """
+                 data_transform=None, measurement_transform=None,
+                 raster_transform=None, query_transform=None):
         self.child = child
 
         def identity(x):
@@ -280,24 +281,28 @@ class Transform(VirtualProduct):
 
         self.data_transform = guard(data_transform)
         self.measurement_transform = guard(measurement_transform)
-        self.raster_transform = guard(raster_transform)
+        self.raster_transform = guard(raster_transform)  # unused so far
+        self.query_transform = guard(query_transform)
 
     def output_measurements(self, product_definitions):
         return self.measurement_transform(self.child.output_measurements(product_definitions))
 
     def find_datasets(self, dc, **query):
-        return self.child.find_datasets(dc, **query)
+        return self.child.find_datasets(dc, **self.query_transform(query))
 
     def build_raster(self, datasets, **query):
-        return self.child.build_raster(datasets, **query)
+        return self.child.build_raster(datasets, **self.query_transform(query))
 
     def fetch_data(self, raster):
         return self.data_transform(self.child.fetch_data(raster))
 
 
-def transform(child, data_transform=None, measurement_transform=None, raster_transform=None):
+def transform(child, data_transform=None, measurement_transform=None,
+              raster_transform=None, query_transform=None):
     return Transform(child, data_transform=data_transform,
-                     measurement_transform=measurement_transform, raster_transform=raster_transform)
+                     measurement_transform=measurement_transform,
+                     raster_transform=raster_transform,
+                     query_transform=query_transform)
 
 
 class Collate(VirtualProduct):
@@ -374,9 +379,6 @@ class Collate(VirtualProduct):
 
     def fetch_data(self, raster):
         assert isinstance(raster, RasterRecipe)
-        grouped_dataset_pile = raster.grouped_dataset_pile
-        geobox = raster.geobox
-        output_measurements = raster.output_measurements
 
         def is_from(source_index):
             def result(indexes, value):
@@ -478,9 +480,7 @@ class Juxtapose(VirtualProduct):
 
     def fetch_data(self, raster):
         assert isinstance(raster, RasterRecipe)
-        grouped_dataset_pile = raster.grouped_dataset_pile
         geobox = raster.geobox
-        output_measurements = raster.output_measurements
 
         def select_child(source_index):
             def result(indexes, value):
