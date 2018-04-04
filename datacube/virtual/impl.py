@@ -1,13 +1,12 @@
-# Warning: this is a WIP
-
 # TODO: needs an aggregation phase (use xarray.DataArray.groupby?)
 # TODO: collate index_measurement
+# TODO: measurement dependency tracking
+# TODO: a mechanism for per-leaf settings
+# TODO: what does GridWorkflow do more than this?
 """
-Implementation of virtual products.
-Provides an interface to the products in the database
-for querying and loading data, and combinators to
-combine multiple products into "virtual" products
-implementing the same interface.
+Implementation of virtual products. Provides an interface for the products in the datacube
+to query and to load data, and combinators to combine multiple products into "virtual"
+products implementing the same interface.
 """
 
 from __future__ import absolute_import
@@ -23,10 +22,8 @@ from datacube.model.utils import xr_apply
 from datacube.api.query import Query, query_group_by, query_geopolygon
 from datacube.api.grid_workflow import _fast_slice
 
-from .utils import select_datasets_inside_polygon
-from .utils import output_geobox
-from .utils import product_definitions_from_index
-from .utils import identical_attrs
+from .utils import select_datasets_inside_polygon, output_geobox
+from .utils import product_definitions_from_index, one_and_only
 
 
 class VirtualProductException(Exception):
@@ -39,8 +36,11 @@ class VirtualProduct(ABC):
 
     @abstractmethod
     def output_measurements(self, product_definitions):
-        # type: (Dict[str, dict]) -> Dict[str, Measurement]
-        """ A dictionary mapping names to measurement metadata. """
+        # type: (Dict[str, Dict]) -> Dict[str, Measurement]
+        """
+        A dictionary mapping names to measurement metadata.
+        :param product_definitions: a dictionary mapping product names to definitions
+        """
 
     @abstractmethod
     def find_datasets(self, dc, **query):
@@ -50,26 +50,29 @@ class VirtualProduct(ABC):
     # no index access below this line
 
     @abstractmethod
-    def build_raster(self, datasets, **query):
-        # type: (DatasetPile, Dict[str, Any]) -> RasterRecipe
+    def group_datasets(self, datasets, **query):
+        # type: (DatasetPile, Dict[str, Any]) -> GroupedDatasetPile
         """
         Datasets grouped by their timestamps.
-        :param datasets: the datasets to fetch data from
+        :param datasets: the `DatasetPile` to fetch data from
         :param query: to specify a spatial sub-region
         """
 
     @abstractmethod
-    def fetch_data(self, raster):
-        # type: (RasterRecipe) -> xarray.Dataset
-        """ Convert virtual raster to `xarray.Dataset`. """
+    def fetch_data(self, grouped, product_definitions):
+        # type: (GroupedDatasetPile, Dict[str, Dict]) -> xarray.Dataset
+        """ Convert grouped datasets to `xarray.Dataset`. """
 
     def load(self, dc, **query):
         # type: (Datacube, Dict[str, Any]) -> xarray.Dataset
         """ Mimic `datacube.Datacube.load`. """
+        product_definitions = product_definitions_from_index(dc.index)
         datasets = self.find_datasets(dc, **query)
-        raster = self.build_raster(datasets, **query)
-        observations = [self.fetch_data(observation)
-                        for observation in raster.split(dim='time')]
+        grouped = self.group_datasets(datasets, **query)
+
+        # for now, fetch one observation at a time
+        observations = [self.fetch_data(observation, product_definitions)
+                        for observation in grouped.split(dim='time')]
         data = xarray.concat(observations, dim='time')
 
         return data
@@ -77,22 +80,20 @@ class VirtualProduct(ABC):
 
 class DatasetPile(object):
     """ Result of `VirtualProduct.find_datasets`. """
-    def __init__(self, kind, pile, grid_spec, output_measurements):
+    def __init__(self, kind, pile, grid_spec):
         assert kind in ['basic', 'collate', 'juxtapose']
         self.kind = kind
         self.pile = tuple(pile)
         self.grid_spec = grid_spec
-        self.output_measurements = output_measurements
 
 
-class RasterRecipe(object):
-    """ Result of `VirtualProduct.build_raster`. """
+class GroupedDatasetPile(object):
+    """ Result of `VirtualProduct.group_datasets`. """
     # our replacement for grid_workflow.Tile basically
     # TODO: copy the Tile API
-    def __init__(self, grouped_dataset_pile, geobox, output_measurements):
-        self.grouped_dataset_pile = grouped_dataset_pile
+    def __init__(self, pile, geobox):
+        self.pile = pile
         self.geobox = geobox
-        self.output_measurements = output_measurements
 
     @property
     def dims(self):
@@ -100,7 +101,7 @@ class RasterRecipe(object):
         Names of the dimensions, e.g., ``('time', 'y', 'x')``.
         :return: tuple(str)
         """
-        return self.grouped_dataset_pile.dims + self.geobox.dimensions
+        return self.pile.dims + self.geobox.dimensions
 
     @property
     def shape(self):
@@ -108,32 +109,30 @@ class RasterRecipe(object):
         Lengths of each dimension, e.g., ``(285, 4000, 4000)``.
         :return: tuple(int)
         """
-        return self.grouped_dataset_pile.shape + self.geobox.shape
+        return self.pile.shape + self.geobox.shape
 
     def __getitem__(self, chunk):
-        pile = self.grouped_dataset_pile
+        pile = self.pile
 
-        return RasterRecipe(_fast_slice(pile, chunk[:len(pile.shape)]),
-                            self.geobox[chunk[len(pile.shape):]],
-                            self.output_measurements)
+        return GroupedDatasetPile(_fast_slice(pile, chunk[:len(pile.shape)]),
+                                  self.geobox[chunk[len(pile.shape):]])
 
     def map(self, func, dtype='O'):
-        return RasterRecipe(xr_apply(self.grouped_dataset_pile, func, dtype=dtype),
-                            self.geobox, self.output_measurements)
+        return GroupedDatasetPile(xr_apply(self.pile, func, dtype=dtype), self.geobox)
 
     def filter(self, predicate):
         mask = self.map(predicate, dtype='bool')
-        return RasterRecipe(self.grouped_dataset_pile[mask.grouped_dataset_pile],
-                            self.geobox, self.output_measurements)
+
+        # NOTE: this could possibly result in an empty pile
+        return GroupedDatasetPile(self.pile[mask.pile], self.geobox)
 
     def split(self, dim='time'):
         # this is slightly different from Tile.split
-        pile = self.grouped_dataset_pile
+        pile = self.pile
 
-        (length,) = pile[dim].shape
+        [length] = pile[dim].shape
         for i in range(length):
-            yield RasterRecipe(pile.isel(**{dim: slice(i, i + 1)}),
-                               self.geobox, self.output_measurements)
+            yield GroupedDatasetPile(pile.isel(**{dim: slice(i, i + 1)}), self.geobox)
 
 
 class BasicProduct(VirtualProduct):
@@ -144,8 +143,15 @@ class BasicProduct(VirtualProduct):
         """
         :param product_name: name of the product
         :param measurement_names: list of names of measurements to include (None if all)
+        :param source_filter: as in `Datacube.load`
+        :param fuse_func: to de-duplicate
+        :param resampling_method: a resampling method that applies to all measurements
         :param dataset_filter: a predicate on `datacube.Dataset` objects
         """
+        # NOTE: if group_by solar_day is implemented as a transform
+        #       fuse_func should never be used here
+        # NOTE: resampling_method can easily be a per-measurement setting
+
         self.product_name = product_name
 
         if measurement_names is not None and len(measurement_names) == 0:
@@ -153,7 +159,7 @@ class BasicProduct(VirtualProduct):
 
         self.measurement_names = measurement_names
 
-        # is this a good place for it?
+        # is this a good place for these?
         self.source_filter = source_filter
         self.fuse_func = fuse_func
         self.resampling_method = resampling_method
@@ -178,7 +184,7 @@ class BasicProduct(VirtualProduct):
         # this is basically a copy of `datacube.Datacube.find_datasets_lazy`
         # ideally that method would look like this too in the future
 
-        # `like` is implicitly supported here, not sure if we should
+        # `like` is implicitly supported here
         # `platform` and `product_type` based queries are possibly ruled out
         # other possible query entries include `geopolygon`
         # and contents of `SPATIAL_KEYS` and `CRS_KEYS`
@@ -186,6 +192,8 @@ class BasicProduct(VirtualProduct):
         index = dc.index
 
         # find the datasets
+
+        # Q: are measurements ever used to find datasets?
         query = Query(index, product=self.product_name, measurements=self.measurement_names,
                       source_filter=self.source_filter, **query)
         assert query.product == self.product_name
@@ -197,18 +205,15 @@ class BasicProduct(VirtualProduct):
             datasets = [dataset for dataset in datasets if self.dataset_filter(dataset)]
 
         # gather information from the index before it disappears from sight
-        product_definitions = product_definitions_from_index(index)
-        output_measurements = self.output_measurements(product_definitions)
+        # this can also possibly extracted from the product definitions but this is easier
         grid_spec = index.products.get_by_name(self.product_name).grid_spec
 
-        return DatasetPile('basic', datasets, grid_spec, output_measurements)
-        # TODO: should we actually return (time-grouped) raster?
+        return DatasetPile('basic', datasets, grid_spec)
 
-    def build_raster(self, datasets, **query):
+    def group_datasets(self, datasets, **query):
         assert isinstance(datasets, DatasetPile) and datasets.kind == 'basic'
         pile = datasets.pile
         grid_spec = datasets.grid_spec
-        output_measurements = datasets.output_measurements
 
         # we will support group_by='solar_day' elsewhere
         assert 'group_by' not in query
@@ -227,32 +232,32 @@ class BasicProduct(VirtualProduct):
         # group by time
         grouped = Datacube.group_datasets(selected, query_group_by(group_by='time'))
 
-        def wrap(indexes, value):
-            return DatasetPile('basic', value, grid_spec, output_measurements)
+        def wrap(_, value):
+            return DatasetPile('basic', value, grid_spec)
 
         # information needed for Datacube.load_data
-        return RasterRecipe(grouped, geobox, output_measurements).map(wrap)
+        return GroupedDatasetPile(grouped, geobox).map(wrap)
 
-    def fetch_data(self, raster):
-        assert isinstance(raster, RasterRecipe)
+    def fetch_data(self, grouped, product_definitions):
+        assert isinstance(grouped, GroupedDatasetPile)
 
         # this method is basically `GridWorkflow.load`
 
-        # convert Measurements back to dicts?
         # essentially what `datacube.api.core.set_resampling_method` does
-        measurements = [{**measurement.__dict__}
-                        for measurement in raster.output_measurements.values()]
-
         if self.resampling_method is not None:
-            measurements = [{'resampling_method': self.resampling_method, **measurement}
-                            for measurement in measurements]
+            resampling = {'resampling_method': self.resampling_method}
+        else:
+            resampling = {}
 
-        def unwrap(indexes, value):
+        measurements = [measurement.to_dict(update_with=resampling)
+                        for _, measurement in self.output_measurements(product_definitions).items()]
+
+        def unwrap(_, value):
             assert isinstance(value, DatasetPile) and value.kind == 'basic'
             return value.pile
 
-        return Datacube.load_data(raster.map(unwrap).grouped_dataset_pile,
-                                  raster.geobox, measurements, fuse_func=self.fuse_func)
+        return Datacube.load_data(grouped.map(unwrap).pile,
+                                  grouped.geobox, measurements, fuse_func=self.fuse_func)
 
 
 def basic_product(product_name, measurement_names=None,
@@ -268,7 +273,7 @@ class Transform(VirtualProduct):
     """
     def __init__(self, child,
                  data_transform=None, measurement_transform=None,
-                 raster_transform=None, query_transform=None):
+                 query_transform=None):
         self.child = child
 
         def identity(x):
@@ -281,7 +286,6 @@ class Transform(VirtualProduct):
 
         self.data_transform = guard(data_transform)
         self.measurement_transform = guard(measurement_transform)
-        self.raster_transform = guard(raster_transform)  # unused so far
         self.query_transform = guard(query_transform)
 
     def output_measurements(self, product_definitions):
@@ -290,18 +294,17 @@ class Transform(VirtualProduct):
     def find_datasets(self, dc, **query):
         return self.child.find_datasets(dc, **self.query_transform(query))
 
-    def build_raster(self, datasets, **query):
-        return self.child.build_raster(datasets, **self.query_transform(query))
+    def group_datasets(self, datasets, **query):
+        return self.child.group_datasets(datasets, **self.query_transform(query))
 
-    def fetch_data(self, raster):
-        return self.data_transform(self.child.fetch_data(raster))
+    def fetch_data(self, grouped, product_definitions):
+        return self.data_transform(self.child.fetch_data(grouped, product_definitions))
 
 
 def transform(child, data_transform=None, measurement_transform=None,
-              raster_transform=None, query_transform=None):
+              query_transform=None):
     return Transform(child, data_transform=data_transform,
                      measurement_transform=measurement_transform,
-                     raster_transform=raster_transform,
                      query_transform=query_transform)
 
 
@@ -340,54 +343,49 @@ class Collate(VirtualProduct):
         return {**first, **self.index_measurement}
 
     def find_datasets(self, dc, **query):
-        index = dc.index
-
         result = [child.find_datasets(dc, **query)
                   for child in self.children]
 
         # should possibly check all the `grid_spec`s are the same
         # requires a `GridSpec.__eq__` method implementation
-        product_definitions = product_definitions_from_index(index)
-        return DatasetPile('collate', result, result[0].grid_spec, self.output_measurements(product_definitions))
+        return DatasetPile('collate', result, result[0].grid_spec)
 
-    def build_raster(self, datasets, **query):
+    def group_datasets(self, datasets, **query):
         assert isinstance(datasets, DatasetPile) and datasets.kind == 'collate'
         assert len(datasets.pile) == len(self.children)
         grid_spec = datasets.grid_spec
-        output_measurements = datasets.output_measurements
 
         def build(source_index, product, dataset_pile):
-            raster = product.build_raster(dataset_pile, **query)
+            grouped = product.group_datasets(dataset_pile, **query)
 
-            def tag(indexes, value):
-                return DatasetPile('collate',
-                                   [value if i == source_index else None
-                                    for i, _ in enumerate(self.children)],
-                                   grid_spec, output_measurements)
+            def tag(_, value):
+                in_position = [value if i == source_index else None
+                               for i, _ in enumerate(self.children)]
+                return DatasetPile('collate', in_position, grid_spec)
 
-            return raster.map(tag)
+            return grouped.map(tag)
 
-        rasters = [build(source_index, product, dataset_pile)
-                   for source_index, (product, dataset_pile)
-                   in enumerate(zip(self.children, datasets.pile))]
+        groups = [build(source_index, product, dataset_pile)
+                  for source_index, (product, dataset_pile)
+                  in enumerate(zip(self.children, datasets.pile))]
 
         # should possibly check all the geoboxes are the same
-        first = rasters[0]
+        first = groups[0]
 
-        concatenated = xarray.concat([raster.grouped_dataset_pile for raster in rasters], dim='time')
-        return RasterRecipe(concatenated, first.geobox, output_measurements)
+        concatenated = xarray.concat([grouped.pile for grouped in groups], dim='time')
+        return GroupedDatasetPile(concatenated, first.geobox)
 
-    def fetch_data(self, raster):
-        assert isinstance(raster, RasterRecipe)
+    def fetch_data(self, grouped, product_definitions):
+        assert isinstance(grouped, GroupedDatasetPile)
 
         def is_from(source_index):
-            def result(indexes, value):
+            def result(_, value):
                 assert isinstance(value, DatasetPile) and value.kind == 'collate'
                 return value.pile[source_index] is not None
 
             return result
 
-        def strip_source(indexes, value):
+        def strip_source(_, value):
             assert isinstance(value, DatasetPile) and value.kind == 'collate'
             for data in value.pile:
                 if data is not None:
@@ -395,21 +393,24 @@ class Collate(VirtualProduct):
 
             raise ValueError("Every child of CollatedDatasetPile object is None")
 
-        def fetch_data(child, r):
+        def fetch_child(child, r):
             size = reduce(lambda x, y: x * y, r.shape, 1)
 
             if size > 0:
-                return child.fetch_data(r)
+                # TODO: merge with source_index here
+                # requires passing source_index to this
+                return child.fetch_data(r, product_definitions)
             else:
                 # empty raster
                 return None
 
-        rasters = [fetch_data(child, raster.filter(is_from(source_index)).map(strip_source))
-                   for source_index, child in enumerate(self.children)]
+        groups = [fetch_child(child, grouped.filter(is_from(source_index)).map(strip_source))
+                  for source_index, child in enumerate(self.children)]
 
-        non_empty = [r for r in rasters if r is not None]
+        non_empty = [g for g in groups if g is not None]
+        attrs = one_and_only([g.attrs for g in non_empty])
 
-        return xarray.concat(non_empty, dim='time').assign_attrs(**identical_attrs(non_empty))
+        return xarray.concat(non_empty, dim='time').assign_attrs(**attrs)
 
 
 def collate(*children, index_measurement_name=None):
@@ -439,68 +440,57 @@ class Juxtapose(VirtualProduct):
         return result
 
     def find_datasets(self, dc, **query):
-        index = dc.index
-
-        product_definitions = product_definitions_from_index(index)
-        result = [child.find_datasets(dc, **query)
-                  for child in self.children]
+        result = [child.find_datasets(dc, **query) for child in self.children]
 
         # should possibly check all the `grid_spec`s are the same
         # requires a `GridSpec.__eq__` method implementation
-        return DatasetPile('juxtapose', result, result[0].grid_spec,
-                           self.output_measurements(product_definitions))
+        return DatasetPile('juxtapose', result, result[0].grid_spec)
 
-    def build_raster(self, datasets, **query):
+    def group_datasets(self, datasets, **query):
         assert isinstance(datasets, DatasetPile) and datasets.kind == 'juxtapose'
         assert len(datasets.pile) == len(self.children)
 
         pile = datasets.pile
         grid_spec = datasets.grid_spec
-        output_measurements = datasets.output_measurements
 
-        rasters = [product.build_raster(datasets, **query)
-                   for product, datasets in zip(self.children, pile)]
+        groups = [product.group_datasets(datasets, **query)
+                  for product, datasets in zip(self.children, pile)]
 
         # should possibly check all the geoboxes are the same
-        geobox = rasters[0].geobox
+        geobox = groups[0].geobox
 
-        aligned_piles = xarray.align(*[raster.grouped_dataset_pile for raster in rasters])
-        child_rasters = [RasterRecipe(aligned_piles[i], raster.geobox, raster.output_measurements)
-                         for i, raster in enumerate(rasters)]
+        aligned_piles = xarray.align(*[grouped.pile for grouped in groups])
+        child_groups = [GroupedDatasetPile(aligned_piles[i], grouped.geobox)
+                        for i, grouped in enumerate(groups)]
 
-        def tuplify(indexes, value):
+        def tuplify(indexes, _):
             return DatasetPile('juxtapose',
-                               [raster.grouped_dataset_pile.sel(**indexes).item()
-                                for raster in child_rasters],
-                               grid_spec, output_measurements)
+                               [grouped.pile.sel(**indexes).item() for grouped in child_groups], grid_spec)
 
-        merged = child_rasters[0].map(tuplify).grouped_dataset_pile
+        merged = child_groups[0].map(tuplify).pile
 
-        return RasterRecipe(merged, geobox, output_measurements)
+        return GroupedDatasetPile(merged, geobox)
 
-    def fetch_data(self, raster):
-        assert isinstance(raster, RasterRecipe)
-        geobox = raster.geobox
+    def fetch_data(self, grouped, product_definitions):
+        assert isinstance(grouped, GroupedDatasetPile)
+        geobox = grouped.geobox
 
         def select_child(source_index):
-            def result(indexes, value):
+            def result(_, value):
                 assert isinstance(value, DatasetPile) and value.kind == 'juxtapose'
                 return value.pile[source_index]
 
             return result
 
         def fetch_recipe(source_index):
-            child_raster = raster.map(select_child(source_index))
-            grouped = child_raster.grouped_dataset_pile
+            child_groups = grouped.map(select_child(source_index))
+            return GroupedDatasetPile(child_groups.pile, geobox)
 
-            # can `grouped` really be empty?
-            child_measurements = grouped.item(0).output_measurements
-            return RasterRecipe(grouped, geobox, child_measurements)
+        groups = [child.fetch_data(fetch_recipe(source_index), product_definitions)
+                  for source_index, child in enumerate(self.children)]
 
-        rasters = [child.fetch_data(fetch_recipe(source_index))
-                   for source_index, child in enumerate(self.children)]
-
-        return xarray.merge(rasters).assign_attrs(**identical_attrs(rasters))
+        attrs = one_and_only([g.attrs for g in groups])
+        return xarray.merge(groups).assign_attrs(**attrs)
 
 
 def juxtapose(*children):

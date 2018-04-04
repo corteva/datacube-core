@@ -41,7 +41,7 @@ def make_mask(product, mask_measurement_name, **flags):
     apply_to = [mask_measurement_name]
 
     def data_transform(data):
-        def worker(key, value):
+        def worker(_, value):
             return make_mask_prim(value, **flags)
 
         return selective_apply(data, apply_to=apply_to, value_map=worker)
@@ -50,7 +50,7 @@ def make_mask(product, mask_measurement_name, **flags):
         if mask_measurement_name not in input_measurements:
             raise VirtualProductException("required measurement {} not found".format(mask_measurement_name))
 
-        def worker(key, value):
+        def worker(_, value):
             result = value.__dict__.copy()
             result['dtype'] = numpy.dtype('bool')
             return Measurement(**result)
@@ -84,7 +84,7 @@ def mask_by(product, mask_measurement_name, apply_to=None, preserve_dtype=True, 
     def measurement_transform(input_measurements):
         rest = {key: value for key, value in input_measurements.items() if key != mask_measurement_name}
 
-        def worker(key, value):
+        def worker(_, value):
             if preserve_dtype:
                 return value
 
@@ -105,7 +105,7 @@ def to_float(product, apply_to=None, dtype=numpy.dtype('float32')):
     Convert the dataset to float. Replaces `nodata` values with `Nan`s.
     """
     def data_transform(data):
-        def worker(key, value):
+        def worker(_, value):
             if hasattr(value, 'dtype') and value.dtype == dtype:
                 return value
 
@@ -114,7 +114,7 @@ def to_float(product, apply_to=None, dtype=numpy.dtype('float32')):
         return selective_apply(data, apply_to=apply_to, value_map=worker)
 
     def measurement_transform(input_measurements):
-        def worker(key, value):
+        def worker(_, value):
             result = value.__dict__.copy()
             result['dtype'] = dtype
             return Measurement(**result)

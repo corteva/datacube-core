@@ -52,8 +52,9 @@ def product_definitions_from_index(index):
             for product in index.products.get_all()}
 
 
-def identical_attrs(rasters):
-    first, *rest = [r.attrs for r in rasters]
+def one_and_only(things):
+    """ Checks that all the members of `things` are equal, and then returns it. """
+    first, *rest = things
     for other in rest:
         # should possibly just emit a warning
         assert first == other, "{} is not the same as {}".format(first, other)
