@@ -21,9 +21,7 @@ from datacube.model import Measurement
 from datacube.model.utils import xr_apply
 from datacube.api.query import Query, query_group_by, query_geopolygon
 from datacube.api.grid_workflow import _fast_slice
-
-from .utils import select_datasets_inside_polygon, output_geobox
-from .utils import product_definitions_from_index, one_and_only
+from datacube.api.core import select_datasets_inside_polygon, output_geobox
 
 
 class VirtualProductException(Exception):
@@ -227,7 +225,7 @@ class BasicProduct(VirtualProduct):
         selected = list(select_datasets_inside_polygon(pile, polygon))
 
         # geobox
-        geobox = output_geobox(pile, grid_spec, **query)
+        geobox = output_geobox(datasets=pile, grid_spec=grid_spec, **query)
 
         # group by time
         grouped = Datacube.group_datasets(selected, query_group_by(group_by='time'))
@@ -346,9 +344,8 @@ class Collate(VirtualProduct):
         result = [child.find_datasets(dc, **query)
                   for child in self.children]
 
-        # should possibly check all the `grid_spec`s are the same
-        # requires a `GridSpec.__eq__` method implementation
-        return DatasetPile('collate', result, result[0].grid_spec)
+        grid_spec = select_unique([datasets.grid_spec for datasets in result])
+        return DatasetPile('collate', result, grid_spec)
 
     def group_datasets(self, datasets, **query):
         assert isinstance(datasets, DatasetPile) and datasets.kind == 'collate'
@@ -369,11 +366,10 @@ class Collate(VirtualProduct):
                   for source_index, (product, dataset_pile)
                   in enumerate(zip(self.children, datasets.pile))]
 
-        # should possibly check all the geoboxes are the same
-        first = groups[0]
+        geobox = select_unique([grouped.geobox for grouped in groups])
 
         concatenated = xarray.concat([grouped.pile for grouped in groups], dim='time')
-        return GroupedDatasetPile(concatenated, first.geobox)
+        return GroupedDatasetPile(concatenated, geobox)
 
     def fetch_data(self, grouped, product_definitions):
         assert isinstance(grouped, GroupedDatasetPile)
@@ -408,7 +404,7 @@ class Collate(VirtualProduct):
                   for source_index, child in enumerate(self.children)]
 
         non_empty = [g for g in groups if g is not None]
-        attrs = one_and_only([g.attrs for g in non_empty])
+        attrs = select_unique([g.attrs for g in non_empty])
 
         return xarray.concat(non_empty, dim='time').assign_attrs(**attrs)
 
@@ -442,9 +438,8 @@ class Juxtapose(VirtualProduct):
     def find_datasets(self, dc, **query):
         result = [child.find_datasets(dc, **query) for child in self.children]
 
-        # should possibly check all the `grid_spec`s are the same
-        # requires a `GridSpec.__eq__` method implementation
-        return DatasetPile('juxtapose', result, result[0].grid_spec)
+        grid_spec = select_unique([datasets.grid_spec for datasets in result])
+        return DatasetPile('juxtapose', result, grid_spec)
 
     def group_datasets(self, datasets, **query):
         assert isinstance(datasets, DatasetPile) and datasets.kind == 'juxtapose'
@@ -456,8 +451,7 @@ class Juxtapose(VirtualProduct):
         groups = [product.group_datasets(datasets, **query)
                   for product, datasets in zip(self.children, pile)]
 
-        # should possibly check all the geoboxes are the same
-        geobox = groups[0].geobox
+        geobox = select_unique([grouped.geobox for grouped in groups])
 
         aligned_piles = xarray.align(*[grouped.pile for grouped in groups])
         child_groups = [GroupedDatasetPile(aligned_piles[i], grouped.geobox)
@@ -489,9 +483,24 @@ class Juxtapose(VirtualProduct):
         groups = [child.fetch_data(fetch_recipe(source_index), product_definitions)
                   for source_index, child in enumerate(self.children)]
 
-        attrs = one_and_only([g.attrs for g in groups])
+        attrs = select_unique([g.attrs for g in groups])
         return xarray.merge(groups).assign_attrs(**attrs)
 
 
 def juxtapose(*children):
     return Juxtapose(*children)
+
+
+def product_definitions_from_index(index):
+    return {product.name: product.definition
+            for product in index.products.get_all()}
+
+
+def select_unique(things):
+    """ Checks that all the members of `things` are equal, and then returns it. """
+    first, *rest = things
+    for other in rest:
+        # should possibly just emit a warning
+        assert first == other, "{} is not the same as {}".format(first, other)
+
+    return first
