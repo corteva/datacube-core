@@ -75,9 +75,7 @@ class VirtualProduct(ABC):
 
 class DatasetPile(object):
     """ Result of `VirtualProduct.find_datasets`. """
-    def __init__(self, kind, pile, grid_spec):
-        assert kind in ['basic', 'collate', 'juxtapose']
-        self.kind = kind
+    def __init__(self, pile, grid_spec):
         self.pile = tuple(pile)
         self.grid_spec = grid_spec
 
@@ -203,10 +201,9 @@ class BasicProduct(VirtualProduct):
         # this can also possibly extracted from the product definitions but this is easier
         grid_spec = index.products.get_by_name(self.product_name).grid_spec
 
-        return DatasetPile('basic', datasets, grid_spec)
+        return DatasetPile(datasets, grid_spec)
 
     def group_datasets(self, datasets, **query):
-        assert isinstance(datasets, DatasetPile) and datasets.kind == 'basic'
         pile = datasets.pile
         grid_spec = datasets.grid_spec
 
@@ -228,7 +225,7 @@ class BasicProduct(VirtualProduct):
         grouped = Datacube.group_datasets(selected, query_group_by(group_by='time'))
 
         def wrap(_, value):
-            return DatasetPile('basic', value, grid_spec)
+            return DatasetPile(value, grid_spec)
 
         # information needed for Datacube.load_data
         return GroupedDatasetPile(grouped, geobox).map(wrap)
@@ -248,7 +245,6 @@ class BasicProduct(VirtualProduct):
                         for _, measurement in self.output_measurements(product_definitions).items()]
 
         def unwrap(_, value):
-            assert isinstance(value, DatasetPile) and value.kind == 'basic'
             return value.pile
 
         return Datacube.load_data(grouped.map(unwrap).pile,
@@ -342,10 +338,9 @@ class Collate(VirtualProduct):
                   for child in self.children]
 
         grid_spec = select_unique([datasets.grid_spec for datasets in result])
-        return DatasetPile('collate', result, grid_spec)
+        return DatasetPile(result, grid_spec)
 
     def group_datasets(self, datasets, **query):
-        assert isinstance(datasets, DatasetPile) and datasets.kind == 'collate'
         assert len(datasets.pile) == len(self.children)
         grid_spec = datasets.grid_spec
 
@@ -355,7 +350,7 @@ class Collate(VirtualProduct):
             def tag(_, value):
                 in_position = [value if i == source_index else None
                                for i, _ in enumerate(self.children)]
-                return DatasetPile('collate', in_position, grid_spec)
+                return DatasetPile(in_position, grid_spec)
 
             return grouped.map(tag)
 
@@ -373,13 +368,11 @@ class Collate(VirtualProduct):
 
         def is_from(source_index):
             def result(_, value):
-                assert isinstance(value, DatasetPile) and value.kind == 'collate'
                 return value.pile[source_index] is not None
 
             return result
 
         def strip_source(_, value):
-            assert isinstance(value, DatasetPile) and value.kind == 'collate'
             for data in value.pile:
                 if data is not None:
                     return data
@@ -436,10 +429,9 @@ class Juxtapose(VirtualProduct):
         result = [child.find_datasets(dc, **query) for child in self.children]
 
         grid_spec = select_unique([datasets.grid_spec for datasets in result])
-        return DatasetPile('juxtapose', result, grid_spec)
+        return DatasetPile(result, grid_spec)
 
     def group_datasets(self, datasets, **query):
-        assert isinstance(datasets, DatasetPile) and datasets.kind == 'juxtapose'
         assert len(datasets.pile) == len(self.children)
 
         pile = datasets.pile
@@ -455,8 +447,9 @@ class Juxtapose(VirtualProduct):
                         for i, grouped in enumerate(groups)]
 
         def tuplify(indexes, _):
-            return DatasetPile('juxtapose',
-                               [grouped.pile.sel(**indexes).item() for grouped in child_groups], grid_spec)
+            return DatasetPile([grouped.pile.sel(**indexes).item()
+                                for grouped in child_groups],
+                               grid_spec)
 
         merged = child_groups[0].map(tuplify).pile
 
@@ -468,7 +461,6 @@ class Juxtapose(VirtualProduct):
 
         def select_child(source_index):
             def result(_, value):
-                assert isinstance(value, DatasetPile) and value.kind == 'juxtapose'
                 return value.pile[source_index]
 
             return result
