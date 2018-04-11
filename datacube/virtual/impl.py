@@ -8,9 +8,6 @@ Implementation of virtual products. Provides an interface for the products in th
 to query and to load data, and combinators to combine multiple products into "virtual"
 products implementing the same interface.
 """
-
-from __future__ import absolute_import
-
 from abc import ABC, abstractmethod
 from functools import reduce
 
