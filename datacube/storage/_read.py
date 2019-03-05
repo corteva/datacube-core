@@ -114,7 +114,7 @@ def read_time_slice(rdr,
 
     :returns: affected destination region
     """
-    assert dst.shape == dst_gbox.shape
+    assert dst.shape[-2:] == dst_gbox.shape
     src_gbox = rdr_geobox(rdr)
 
     rr = compute_reproject_roi(src_gbox, dst_gbox)
@@ -142,7 +142,6 @@ def read_time_slice(rdr,
 
         dst = dst[rr.roi_dst]
         pix = rdr.read(*norm_read_args(rr.roi_src, dst.shape))
-
         if sx < 0:
             pix = pix[:, ::-1]
         if sy < 0:

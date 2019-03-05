@@ -58,15 +58,14 @@ def reproject_and_fuse(datasources: List[DataSource],
     from ._read import read_time_slice
     assert len(destination.shape) == 2
 
+
     def copyto_fuser(dest: np.ndarray, src: np.ndarray) -> None:
         _default_fuser(dest, src, dst_nodata)
 
     fuse_func = fuse_func or copyto_fuser
 
     destination.fill(dst_nodata)
-    if len(datasources) == 0:
-        return destination
-    elif len(datasources) == 1:
+    if len(datasources) == 1:
         with ignore_exceptions_if(skip_broken_datasets):
             with datasources[0].open() as rdr:
                 read_time_slice(rdr, destination, dst_gbox, resampling, dst_nodata)
@@ -74,8 +73,7 @@ def reproject_and_fuse(datasources: List[DataSource],
         if progress_cbk:
             progress_cbk(1, 1)
 
-        return destination
-    else:
+    elif len(datasources) > 1:
         # Multiple sources, we need to fuse them together into a single array
         buffer_ = np.full(destination.shape, dst_nodata, dtype=destination.dtype)
         for n_so_far, source in enumerate(datasources, 1):
@@ -90,7 +88,7 @@ def reproject_and_fuse(datasources: List[DataSource],
             if progress_cbk:
                 progress_cbk(n_so_far, len(datasources))
 
-        return destination
+    return destination
 
 
 def _mk_empty_ds(coords: DataArrayCoordinates, geobox: GeoBox) -> XrDataset:

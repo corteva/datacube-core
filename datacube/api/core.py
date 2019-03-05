@@ -499,7 +499,8 @@ class Datacube(object):
     @staticmethod
     def _xr_load(sources, geobox, measurements,
                  skip_broken_datasets=False,
-                 progress_cbk=None):
+                 progress_cbk=None,
+                 extra_dims=()):
 
         def mk_cbk(cbk):
             if cbk is None:
@@ -513,27 +514,34 @@ class Datacube(object):
                 return cbk(n, n_total)
             return _cbk
 
-        data = Datacube.create_storage(sources.coords, geobox, measurements)
+        original_dims = tuple([(dim, sources.coords[dim]) for dim in sources.dims])
+        data = Datacube.create_storage(OrderedDict(original_dims + extra_dims),
+                                       geobox, measurements)
         _cbk = mk_cbk(progress_cbk)
 
         for index, datasets in numpy.ndenumerate(sources.values):
             for m in measurements:
-                t_slice = data[m.name].values[index]
-
                 try:
-                    _fuse_measurement(t_slice, datasets, geobox, m,
-                                      skip_broken_datasets=skip_broken_datasets,
-                                      progress_cbk=_cbk)
+                    if len(data[m.name].shape) == 4:
+                        for bandidx in range(data[m.name].shape[1]):
+                            t_slice = data[m.name].values[index[0], bandidx]
+                            _fuse_measurement(t_slice, datasets, geobox, m,
+                                            skip_broken_datasets=skip_broken_datasets,
+                                            progress_cbk=_cbk,
+                                            band=bandidx+1)
+                    else:
+                        t_slice = data[m.name].values[index]
+                        _fuse_measurement(t_slice, datasets, geobox, m,
+                                        skip_broken_datasets=skip_broken_datasets)
                 except (TerminateCurrentLoad, KeyboardInterrupt):
                     data.attrs['dc_partial_load'] = True
                     return data
-
         return data
 
     @staticmethod
     def load_data(sources, geobox, measurements, resampling=None,
                   fuse_func=None, dask_chunks=None, skip_broken_datasets=False,
-                  progress_cbk=None,
+                  progress_cbk=None, extra_dims=(),
                   **extra):
         """
         Load data from :meth:`group_datasets` into an :class:`xarray.Dataset`.
@@ -586,7 +594,8 @@ class Datacube(object):
         else:
             return Datacube._xr_load(sources, geobox, measurements,
                                      skip_broken_datasets=skip_broken_datasets,
-                                     progress_cbk=progress_cbk)
+                                     progress_cbk=progress_cbk,
+                                     extra_dims=extra_dims)
 
     def __str__(self):
         return "Datacube<index={!r}>".format(self.index)
@@ -695,13 +704,15 @@ def fuse_lazy(datasets, geobox, measurement, skip_broken_datasets=False, prepend
 
 def _fuse_measurement(dest, datasets, geobox, measurement,
                       skip_broken_datasets=False,
-                      progress_cbk=None):
+                      progress_cbk=None,
+                      band=None):
     srcs = []
     for ds in datasets:
         src = None
         with ignore_exceptions_if(skip_broken_datasets):
             src = new_datasource(BandInfo(ds, measurement.name))
-
+            if band is not None:
+                src._band_info.band = band
         if src is None:
             if not skip_broken_datasets:
                 raise ValueError(f"Failed to load dataset: {ds.id}")
