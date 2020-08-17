@@ -185,6 +185,37 @@ class Dataset:
                       0, bounds['lr']['y'] - bounds['ul']['y'], bounds['ul']['y'])
 
     @property
+    def additional_coordinates(self) -> List[Dict[str, Any]]:
+        """
+        This is for n => 4 dimensional rasters.
+
+        The order for adding coordinates:
+          (time, *additional_coordinates, y, x)
+
+        Requirements:
+        - Returns an ordered list with the order and contents being
+          consistent across all datasets.
+        - The values should be scalars.
+
+
+        Example::
+
+        [
+            {
+                "name": "depth",
+                "description": "Depth from surface.",
+                "units": "metre",
+                "value": 10,
+            }
+        ]
+
+        """
+        try:
+            return self.metadata_doc["additional_coordinates"]
+        except KeyError:
+            return []
+
+    @property
     def is_archived(self) -> bool:
         """
         Is this dataset archived?

@@ -210,7 +210,9 @@ def mk_sample_dataset(bands,
                       timestamp=None,
                       id='3a1df9e0-8484-44fc-8102-79184eab85dd',
                       geobox=None,
-                      product_opts=None):
+                      product_opts=None,
+                      additional_coordinates=None,
+                      ):
     # pylint: disable=redefined-builtin
     image_bands_keys = 'path layer band'.split(' ')
     measurement_keys = 'dtype units nodata aliases name'.split(' ')
@@ -237,13 +239,16 @@ def mk_sample_dataset(bands,
     else:
         uris = [uri]
 
-    return Dataset(ds_type, {
+    metadata = {
         'id': id,
         'format': {'name': format},
         'image': {'bands': image_bands},
         'time': timestamp,
         **geobox_to_gridspatial(geobox),
-    }, uris=uris)
+    }
+    if additional_coordinates is not None:
+        metadata["additional_coordinates"] = additional_coordinates
+    return Dataset(ds_type, metadata, uris=uris)
 
 
 def make_graph_abcde(node):
@@ -378,6 +383,7 @@ def gen_tiff_dataset(bands,
                      base_folder,
                      prefix='',
                      timestamp='2018-07-19',
+                     additional_coordinates=None,
                      **kwargs):
     """
        each band:
@@ -415,7 +421,8 @@ def gen_tiff_dataset(bands,
     ds = mk_sample_dataset(mm,
                            uri=uri,
                            timestamp=timestamp,
-                           geobox=gbox)
+                           geobox=gbox,
+                           additional_coordinates=additional_coordinates)
     return ds, gbox
 
 

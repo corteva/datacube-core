@@ -142,6 +142,7 @@ def read_time_slice(rdr,
 
         dst = dst[rr.roi_dst]
         pix = rdr.read(*norm_read_args(rr.roi_src, dst.shape))
+
         if sx < 0:
             pix = pix[:, ::-1]
         if sy < 0:

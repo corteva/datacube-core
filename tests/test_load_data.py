@@ -139,6 +139,69 @@ def test_load_data_cbk(tmpdir):
     assert progress_call_data == [(1, 4), (2, 4)]
 
 
+def test_load_data__4dim(tmpdir):
+    tmpdir = Path(str(tmpdir))
+
+    spatial = dict(resolution=(15, -15),
+                   offset=(11230, 1381110),)
+
+    nodata = -999
+    aa = mk_test_image(96, 64, 'int16', nodata=nodata)
+
+    datasets = []
+    for depth in [5, 10]:
+        ds, gbox = gen_tiff_dataset(
+            [SimpleNamespace(name='aa', values=aa, nodata=nodata)],
+            tmpdir,
+            prefix=f'ds1-{depth}',
+            timestamp='2018-07-19',
+            additional_coordinates=[
+                {
+                    "name": "depth",
+                    "description": "Depth from surface.",
+                    "units": "metre",
+                    "value": depth,
+                }
+            ],
+            **spatial,
+        )
+        assert ds.time is not None
+
+        ds2, _ = gen_tiff_dataset(
+            [SimpleNamespace(name='aa', values=aa, nodata=nodata)],
+            tmpdir,
+            prefix=f'ds2-{depth}',
+            timestamp='2018-07-19',
+            additional_coordinates=[
+                {
+                    "name": "depth",
+                    "description": "Depth from surface.",
+                    "units": "metre",
+                    "value": depth,
+                }
+            ],
+            **spatial,
+        )
+        assert ds.time is not None
+        assert ds.time == ds2.time
+        datasets.extend([ds, ds2])
+
+    sources = Datacube.group_datasets(datasets, 'time')
+
+    mm = ['aa']
+    mm = [ds.type.measurements[k] for k in mm]
+
+    ds_data = Datacube.load_data(sources, gbox, mm)
+    assert ds_data.aa.nodata == nodata
+    np.testing.assert_array_equal(aa, ds_data.aa.values[0][0])
+    np.testing.assert_array_equal(ds_data.coords["depth"].values, [5, 10])
+    assert ds_data.coords["depth"].attrs == {
+        'description': 'Depth from surface.',
+        'units': 'metre',
+    }
+    assert ds_data.dims == {'time': 1, 'depth': 2, 'y': 64, 'x': 96}
+
+
 def test_hdf5_lock_release_on_failure():
     from datacube.storage._rio import RasterDatasetDataSource, HDF5_LOCK
     from datacube.storage import BandInfo

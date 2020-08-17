@@ -1,5 +1,6 @@
 import uuid
 import collections.abc
+from collections import defaultdict
 from itertools import groupby
 from typing import Union, Optional, Dict, Tuple
 import datetime
@@ -20,6 +21,7 @@ from datacube.model.utils import xr_apply
 from .query import Query, query_group_by, query_geopolygon
 from ..index import index_connect
 from ..drivers import new_datasource
+from ..model import Dataset
 
 
 class TerminateCurrentLoad(Exception):
@@ -378,7 +380,14 @@ class Datacube(object):
         dimension, group_func, units, sort_key = group_by
 
         def ds_sorter(ds):
-            return sort_key(ds), getattr(ds, 'id', 0)
+            return (
+                sort_key(ds),
+                *[
+                    coord["value"] for coord in
+                    getattr(ds, "additional_coordinates", ())
+                ],
+                getattr(ds, 'id', 0),
+            )
 
         def norm_axis_value(x):
             if isinstance(x, datetime.datetime):
@@ -390,26 +399,63 @@ class Datacube(object):
         def mk_group(group):
             dss = tuple(sorted(group, key=ds_sorter))
             # TODO: decouple axis_value from group sorted order
-            axis_value = sort_key(dss[0])
+            axis_value = (
+                sort_key(dss[0]),
+                [
+                    coord["value"] for coord in
+                    getattr(dss[0], "additional_coordinates", ())
+                ],
+            )
             return (norm_axis_value(axis_value), dss)
 
-        datasets = sorted(datasets, key=group_func)
+        def additional_coordinates_group_func(ds: Dataset):
+            values = [
+                coord["value"] for coord in
+                getattr(ds, "additional_coordinates", ())
+            ]
+            return (group_func(ds), *values)
 
-        groups = [mk_group(group)
-                  for _, group in groupby(datasets, group_func)]
+        # prepare attributes and dimensions
+        dimensions = [dimension]
+        attrs = {}
+        for coord in getattr(datasets[0], "additional_coordinates", ()):
+            dimension = coord["name"]
+            dimensions.append(dimension)
+            attrs[dimension] = {
+                "units": coord["units"],
+                "description": coord["description"],
+            }
+        # group datasets by their coordinates
+        datasets = sorted(datasets, key=additional_coordinates_group_func)
+        groups = []
+        coords = defaultdict(set)
+        for group_keys, group in groupby(datasets, additional_coordinates_group_func):
+            groups.append(mk_group(group))
+            for iii, idimension in enumerate(dimensions):
+                coords[idimension].add(group_keys[iii])
 
         groups.sort(key=lambda x: x[0])
+        for key in coords:
+            coords[key] = numpy.array(sorted(coords[key]))
+        # create a numpy array filled with the datasets
+        data = numpy.empty(
+            numpy.prod(tuple(len(coords[dimension]) for dimension in dimensions)),
+            dtype=object,
+        )
+        for iii, (_, dss) in enumerate(groups):
+            data[iii] = dss
 
-        coords = numpy.asarray([coord for coord, _ in groups])
-        data = numpy.empty(len(coords), dtype=object)
-        for i, (_, dss) in enumerate(groups):
-            data[i] = dss
-
-        sources = xarray.DataArray(data, dims=[dimension], coords=[coords])
-        if coords.dtype.kind == 'M':
-            # skip units for time dimensions as it breaks .to_netcdf(..) functionality #972
+        sources = xarray.DataArray(
+            data.reshape(tuple(len(coords[dimension]) for dimension in dimensions)),
+            dims=dimensions,
+            coords=coords,
+        )
+        if coords[dimension].dtype.kind == 'M':
+            # skip units for time dimensions as it breaks .to_netcdf(..)
+            # functionality #972
             sources[dimension].attrs['units'] = units
-
+        for idimension in dimensions:
+            sources[idimension].attrs = attrs.get(idimension, {})
         return sources
 
     @staticmethod
@@ -499,8 +545,7 @@ class Datacube(object):
     @staticmethod
     def _xr_load(sources, geobox, measurements,
                  skip_broken_datasets=False,
-                 progress_cbk=None,
-                 extra_dims=()):
+                 progress_cbk=None):
 
         def mk_cbk(cbk):
             if cbk is None:
@@ -514,34 +559,27 @@ class Datacube(object):
                 return cbk(n, n_total)
             return _cbk
 
-        original_dims = tuple([(dim, sources.coords[dim]) for dim in sources.dims])
-        data = Datacube.create_storage(OrderedDict(original_dims + extra_dims),
-                                       geobox, measurements)
+        data = Datacube.create_storage(sources.coords, geobox, measurements)
         _cbk = mk_cbk(progress_cbk)
 
         for index, datasets in numpy.ndenumerate(sources.values):
             for m in measurements:
+                t_slice = data[m.name].values[index]
+
                 try:
-                    if len(data[m.name].shape) == 4:
-                        for bandidx in range(data[m.name].shape[1]):
-                            t_slice = data[m.name].values[index[0], bandidx]
-                            _fuse_measurement(t_slice, datasets, geobox, m,
-                                            skip_broken_datasets=skip_broken_datasets,
-                                            progress_cbk=_cbk,
-                                            band=bandidx+1)
-                    else:
-                        t_slice = data[m.name].values[index]
-                        _fuse_measurement(t_slice, datasets, geobox, m,
-                                        skip_broken_datasets=skip_broken_datasets)
+                    _fuse_measurement(t_slice, datasets, geobox, m,
+                                      skip_broken_datasets=skip_broken_datasets,
+                                      progress_cbk=_cbk)
                 except (TerminateCurrentLoad, KeyboardInterrupt):
                     data.attrs['dc_partial_load'] = True
                     return data
+
         return data
 
     @staticmethod
     def load_data(sources, geobox, measurements, resampling=None,
                   fuse_func=None, dask_chunks=None, skip_broken_datasets=False,
-                  progress_cbk=None, extra_dims=(),
+                  progress_cbk=None,
                   **extra):
         """
         Load data from :meth:`group_datasets` into an :class:`xarray.Dataset`.
@@ -594,8 +632,7 @@ class Datacube(object):
         else:
             return Datacube._xr_load(sources, geobox, measurements,
                                      skip_broken_datasets=skip_broken_datasets,
-                                     progress_cbk=progress_cbk,
-                                     extra_dims=extra_dims)
+                                     progress_cbk=progress_cbk)
 
     def __str__(self):
         return "Datacube<index={!r}>".format(self.index)
@@ -704,15 +741,13 @@ def fuse_lazy(datasets, geobox, measurement, skip_broken_datasets=False, prepend
 
 def _fuse_measurement(dest, datasets, geobox, measurement,
                       skip_broken_datasets=False,
-                      progress_cbk=None,
-                      band=None):
+                      progress_cbk=None):
     srcs = []
     for ds in datasets:
         src = None
         with ignore_exceptions_if(skip_broken_datasets):
             src = new_datasource(BandInfo(ds, measurement.name))
-            if band is not None:
-                src._band_info.band = band
+
         if src is None:
             if not skip_broken_datasets:
                 raise ValueError(f"Failed to load dataset: {ds.id}")
